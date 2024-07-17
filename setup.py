@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
-import setuptools
 from pathlib import Path
+
+import setuptools
 
 package_name = 'vspreview'
 
@@ -31,8 +32,8 @@ setuptools.setup(
     packages=setuptools.find_packages('.', ('docs', 'stubs')),
     package_data={
         package_name: ['py.typed'],
-        f'{package_name}.plugins': [
-            file.name for file in (Path(package_name) / 'plugins').glob('*.ppy')
+        f'{package_name}.plugins.builtins': [
+            file.name for file in (Path(package_name) / 'plugins' / 'builtins').glob('*.ppy')
         ]
     },
     classifiers=[

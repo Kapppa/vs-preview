@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import logging
 import sys
+import traceback
 from functools import lru_cache
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping, TypeVar, overload, Literal
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, Mapping, TypeVar, overload
 
 from PyQt6.QtWidgets import QWidget
 
-from ..core import AbstractYAMLObjectSingleton, Frame, storage_err_msg
+from ..core import AbstractYAMLObjectSingleton, Frame, storage_err_msg, try_load
 from . import utils
 from .abstract import (
-    AbstractPlugin, FileResolvePluginConfig, FileResolverPlugin, PluginConfig, ResolvedScript, _BasePluginT
+    AbstractPlugin, FileResolvePluginConfig, FileResolverPlugin, PluginConfig, PluginSettings, ResolvedScript,
+    _BasePluginT, SettingsNamespace
 )
 from .utils import *  # noqa: F401,F403
 
@@ -49,16 +51,20 @@ class PluginModule:
         return super().__new__(cls)
 
     def __init__(self, path: Path) -> None:
-        spec = spec_from_file_location(path.stem, path)
+        spec = spec_from_file_location(path.stem, path, submodule_search_locations=[])
 
         if spec is None:
             raise ImportError
 
         module = module_from_spec(spec)
 
+        import_path = str(path.parent)
+
+        sys.path.append(import_path)
         sys.modules[module.__name__] = module
 
         if spec.loader is None:
+            sys.path.remove(import_path)
             raise PluginImportError
 
         spec.loader.exec_module(module)
@@ -69,6 +75,7 @@ class PluginModule:
         try:
             module.__all__
         except AttributeError:
+            sys.path.remove(import_path)
             raise PluginImportError(
                 f'The plugin "{path.stem}" has no __all__ defined and thus can\'t be imported!'
             )
@@ -119,7 +126,7 @@ def resolve_plugins() -> Iterable[Path]:
         for folder in (f for f in folder.glob('*') if f.is_dir()):
             _find_files(folder, ignore_path)
 
-    _check_folder(Path(__file__).parent, True)
+    _check_folder(Path(__file__).parent / 'builtins', True)
     _check_folder(MainWindow.global_plugins_dir)
 
     for paths_file in MainWindow.global_plugins_dir.glob('*.pth'):
@@ -138,14 +145,18 @@ def _import_warning_once(path: Path, message: str) -> None:
         print(ImportWarning(message))
 
 
+def get_clean_trace():
+    return traceback.format_exc().split('_call_with_frames_removed\n')[1]
+
+
 def file_to_plugins(path: Path, plugin_type: type[PluginT]) -> Iterable[type[PluginT]]:
     try:
         module = PluginModule(path)
-    except PluginImportError as e:
-        return _import_warning_once(path, e.msg)
-    except ImportError as e:
+    except PluginImportError:
+        return _import_warning_once(path, get_clean_trace())
+    except ImportError:
         return _import_warning_once(
-            path, f'The plugin at "{path}" could not be loaded because of this import error: \n\t{str(e)}'
+            path, f'The plugin at "{path}" could not be loaded because of this import error: \n{get_clean_trace()}'
         )
 
     for export in module.__all__:
@@ -195,9 +206,52 @@ def get_installed_plugins(
             if ret_class:
                 plugins[plugin._config.namespace] = plugin  # type: ignore
             else:
-                plugins[plugin._config.namespace] = plugin(*args, **kwargs)  # type: ignore
+                plugins[plugin._config.namespace] = pl = plugin(*args, **kwargs)  # type: ignore
+                pl.settings = plugin._config.settings_type(plugins[plugin._config.namespace])
 
     return plugins
+
+
+class LocalPluginsSettings(AbstractYAMLObjectSingleton):
+    def __init__(self, state: dict[str, Mapping[str, Any]]) -> None:
+        self.state = state
+
+    def __getstate__(self) -> Mapping[str, Mapping[str, Any]]:
+        return self.state | {
+            plugin._config.namespace: plugin.settings.local
+            for plugin in Plugins.instance[0]
+        }
+
+    def __setstate__(self, state: Mapping[str, Mapping[str, Any]]) -> None:
+        if not hasattr(self, 'state'):
+            self.state = {}
+
+        self.state |= state
+
+        for plugin in Plugins.instance[0]:
+            if plugin._config.namespace in self.state:
+                plugin.settings.local = self.state[plugin._config.namespace]
+
+
+class GlobalPluginsSettings(AbstractYAMLObjectSingleton):
+    def __init__(self, state: dict[str, Mapping[str, Any]]) -> None:
+        self.state = state
+
+    def __getstate__(self) -> Mapping[str, Mapping[str, Any]]:
+        return self.state | {
+            plugin._config.namespace: plugin.settings.globals
+            for plugin in Plugins.instance[0]
+        }
+
+    def __setstate__(self, state: Mapping[str, Mapping[str, Any]]) -> None:
+        if not hasattr(self, 'state'):
+            self.state = {}
+
+        self.state |= state
+
+        for plugin in Plugins.instance[0]:
+            if plugin._config.namespace in self.state:
+                plugin.settings.globals = self.state[plugin._config.namespace]
 
 
 class Plugins(AbstractYAMLObjectSingleton):
@@ -215,6 +269,7 @@ class Plugins(AbstractYAMLObjectSingleton):
         main.plugins = self
 
         self.main = main
+        self.settings = {}
         self.plugins_tab = main.plugins_tab
         self.main.main_split.setSizes([0, 0])
         self.main.reload_before_signal.connect(self.reset_last_reload)
@@ -328,17 +383,18 @@ class Plugins(AbstractYAMLObjectSingleton):
 
     def __getstate__(self) -> Mapping[str, Mapping[str, Any]]:
         return {
-            toolbar_name: getattr(self, toolbar_name).__getstate__()
-            for toolbar_name in self.plugins
+            'global_settings': GlobalPluginsSettings({
+                k: v.globals
+                for k, v in self.settings
+            } | {
+                plugin._config.namespace: plugin.settings.globals
+                for plugin in self
+            }),
+            'local_settings': LocalPluginsSettings({
+                k: v.local
+                for k, v in self.settings
+            } | {
+                plugin._config.namespace: plugin.settings.local
+                for plugin in self
+            })
         }
-
-    def __setstate__(self, state: Mapping[str, Mapping[str, Any]]) -> None:
-        for toolbar_name in self.plugins:
-            try:
-                storage = state[toolbar_name]
-                if not isinstance(storage, Mapping):
-                    raise TypeError
-                getattr(self, toolbar_name).__setstate__(storage)
-            except (KeyError, TypeError) as e:
-                logging.error(e)
-                logging.warning(storage_err_msg(toolbar_name))
