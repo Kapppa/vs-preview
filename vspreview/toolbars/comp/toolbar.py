@@ -163,7 +163,7 @@ class Worker(QObject):
         return self.is_finished
 
     def run(self, conf: WorkerConfiguration) -> None:
-        all_images = list[list[SPath]]()
+        all_images = list[list[str]]()
         all_image_types = list[list[str]]()
         conf.path.mkdir(parents=True, exist_ok=False)
 
@@ -192,7 +192,7 @@ class Worker(QObject):
                     output.source.clip, False, PackingType.CURRENT.vs_format.replace(bits_per_sample=8, sample_type=vs.INTEGER)
                 )
 
-                path_images = [curr_filename.format(n) for n in conf.frames[i]]
+                path_images = [str(curr_filename) % n for n in conf.frames[i]]
 
                 def _frame_callback(n: int, f: vs.VideoFrame) -> str:
                     if self.isFinished():
