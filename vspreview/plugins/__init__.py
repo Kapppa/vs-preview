@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import sys
 import traceback
 from functools import lru_cache
@@ -10,12 +9,13 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, Mapping, TypeVar, overload
 
 from PyQt6.QtWidgets import QWidget
+from stgpytools import KwargsT
 
-from ..core import AbstractYAMLObjectSingleton, Frame, storage_err_msg, try_load
+from ..core import AbstractYAMLObjectSingleton, Frame
 from . import utils
 from .abstract import (
     AbstractPlugin, FileResolvePluginConfig, FileResolverPlugin, PluginConfig, PluginSettings, ResolvedScript,
-    _BasePluginT, SettingsNamespace
+    SettingsNamespace, _BasePluginT
 )
 from .utils import *  # noqa: F401,F403
 
@@ -31,7 +31,7 @@ PluginT = TypeVar('PluginT', bound=_BasePluginT)
 
 
 __all__ = [
-    'AbstractPlugin', 'PluginConfig',
+    'AbstractPlugin', 'PluginConfig', 'PluginSettings', 'SettingsNamespace',
     'FileResolverPlugin', 'FileResolvePluginConfig', 'ResolvedScript',
     *utils.__all__
 ]
@@ -145,7 +145,7 @@ def _import_warning_once(path: Path, message: str) -> None:
         print(ImportWarning(message))
 
 
-def get_clean_trace():
+def get_clean_trace() -> str:
     return traceback.format_exc().split('_call_with_frames_removed\n')[1]
 
 
@@ -204,18 +204,15 @@ def get_installed_plugins(
                 continue
 
             if ret_class:
-                plugins[plugin._config.namespace] = plugin  # type: ignore
+                plugins[plugin._config.namespace] = plugin
             else:
-                plugins[plugin._config.namespace] = pl = plugin(*args, **kwargs)  # type: ignore
+                plugins[plugin._config.namespace] = pl = plugin(*args, **kwargs)
                 pl.settings = plugin._config.settings_type(plugins[plugin._config.namespace])
 
     return plugins
 
 
 class LocalPluginsSettings(AbstractYAMLObjectSingleton):
-    def __init__(self, state: dict[str, Mapping[str, Any]]) -> None:
-        self.state = state
-
     def __getstate__(self) -> Mapping[str, Mapping[str, Any]]:
         return self.state | {
             plugin._config.namespace: plugin.settings.local
@@ -231,12 +228,15 @@ class LocalPluginsSettings(AbstractYAMLObjectSingleton):
         for plugin in Plugins.instance[0]:
             if plugin._config.namespace in self.state:
                 plugin.settings.local = self.state[plugin._config.namespace]
+                plugin.settings.__setstate__(False)
+
+        if 'gui' in self.state:
+            Plugins.instance[0].gui_settings.local = self.state['gui']
+
+        Plugins.instance[0].__setstate__(False)
 
 
 class GlobalPluginsSettings(AbstractYAMLObjectSingleton):
-    def __init__(self, state: dict[str, Mapping[str, Any]]) -> None:
-        self.state = state
-
     def __getstate__(self) -> Mapping[str, Mapping[str, Any]]:
         return self.state | {
             plugin._config.namespace: plugin.settings.globals
@@ -252,6 +252,12 @@ class GlobalPluginsSettings(AbstractYAMLObjectSingleton):
         for plugin in Plugins.instance[0]:
             if plugin._config.namespace in self.state:
                 plugin.settings.globals = self.state[plugin._config.namespace]
+                plugin.settings.__setstate__(True)
+
+        if 'gui' in self.state:
+            Plugins.instance[0].gui_settings.globals = self.state['gui']
+
+        Plugins.instance[0].__setstate__(True)
 
 
 class Plugins(AbstractYAMLObjectSingleton):
@@ -269,9 +275,10 @@ class Plugins(AbstractYAMLObjectSingleton):
         main.plugins = self
 
         self.main = main
-        self.settings = {}
+        self.settings = SettingsNamespace()
+        self.gui_settings = SettingsNamespace({'local': SettingsNamespace(), 'globals': SettingsNamespace()})
         self.plugins_tab = main.plugins_tab
-        self.main.main_split.setSizes([0, 0])
+
         self.main.reload_before_signal.connect(self.reset_last_reload)
 
         self.reset_last_reload()
@@ -297,10 +304,36 @@ class Plugins(AbstractYAMLObjectSingleton):
             self.plugins_tab.addTab(plugin, plugin._config.display_name)
             i += 1
 
+    def setup_ui(self) -> None:
+        if self.main.settings.plugins_bar_save_behaviour:
+            gui = self.gui_settings[['globals', 'local'][self.main.settings.plugins_bar_save_behaviour - 1]]
+
+            if 'sizes' in gui:
+                self.main.main_split.setSizes(gui.sizes)
+
+            if 'lastplugin' in gui:
+                self.main.plugins_tab.setCurrentIndex(
+                    next((plugin.index for nsp, plugin in self.plugins.items() if nsp == gui['lastplugin']), 0)
+                )
+        else:
+            self.main.main_split.setSizes([0, 0])
+            self.main.plugins_tab.setCurrentIndex(0)
+
     def reset_last_reload(self) -> None:
         self.last_frame_change = (-1, -1, -1)
 
         self.last_output_change = (-1, -1)
+
+    def get_gui_settings(self, isglobal: bool) -> KwargsT:
+        sett_global = not bool(self.main.settings.plugins_bar_save_behaviour - 1)
+
+        if (not self.main.settings.plugins_bar_save_behaviour) or (isglobal != sett_global):
+            return self.gui_settings.globals if isglobal else self.gui_settings.local
+
+        return SettingsNamespace({
+            'sizes': self.main.main_split.sizes(),
+            'lastplugin': list(self.plugins.keys())[self.main.plugins_tab.currentIndex()]
+        })
 
     def init_outputs(self) -> None:
         for plugin in self:
@@ -312,7 +345,9 @@ class Plugins(AbstractYAMLObjectSingleton):
 
         curr_render = (tab_idx, self.main.current_output.index, int(frame))
 
-        if self.main.main_split.current_position and self.last_frame_change != curr_render:
+        if self.main.main_split.current_position and (
+            self.last_frame_change != curr_render or self.instant_update
+        ):
             if self[tab_idx].first_load():
                 self[tab_idx].init_outputs()
             self[tab_idx].on_current_frame_changed(frame)
@@ -324,7 +359,9 @@ class Plugins(AbstractYAMLObjectSingleton):
 
         curr_output = (tab_idx, index)
 
-        if self.main.main_split.current_position and self.last_output_change != curr_output:
+        if self.main.main_split.current_position and (
+            self.last_output_change != curr_output or self.instant_update
+        ):
             if self[tab_idx].first_load():
                 self[tab_idx].init_outputs()
             self[tab_idx].on_current_output_changed(index, prev_index)
@@ -349,6 +386,16 @@ class Plugins(AbstractYAMLObjectSingleton):
 
         self.main.main_split.setSizes([sizel, sizer - 1])
         self.main.main_split.setSizes([sizel, sizer])
+
+    @property
+    def instant_update(self) -> bool:
+        if self.main.settings.plugins_bar_save_behaviour:
+            gui = self.gui_settings[['globals', 'local'][self.main.settings.plugins_bar_save_behaviour - 1]]
+
+            if 'sizes' in gui:
+                return bool(gui.sizes[-1])
+
+        return False
 
     @overload
     def __getitem__(self, _sub: str | int) -> AbstractPlugin:
@@ -382,19 +429,34 @@ class Plugins(AbstractYAMLObjectSingleton):
             ...
 
     def __getstate__(self) -> Mapping[str, Mapping[str, Any]]:
-        return {
-            'global_settings': GlobalPluginsSettings({
+        GlobalPluginsSettings().state = (
+            {
                 k: v.globals
                 for k, v in self.settings
             } | {
                 plugin._config.namespace: plugin.settings.globals
                 for plugin in self
-            }),
-            'local_settings': LocalPluginsSettings({
+            } | {
+                'gui': self.get_gui_settings(True)
+            }
+        )
+
+        LocalPluginsSettings().state = (
+            {
                 k: v.local
                 for k, v in self.settings
             } | {
                 plugin._config.namespace: plugin.settings.local
                 for plugin in self
-            })
+            } | {
+                'gui': self.get_gui_settings(False)
+            }
+        )
+
+        return {
+            'global_settings': GlobalPluginsSettings(),
+            'local_settings': LocalPluginsSettings()
         }
+
+    def __setstate__(self, isglobal: bool) -> None:
+        self.setup_ui()

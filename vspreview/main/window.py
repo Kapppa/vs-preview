@@ -19,12 +19,12 @@ from vsengine import vpy  # type: ignore
 from vstools import get_prop
 
 from ..core import (
-    PRELOADED_MODULES, AbstractQItem, CroppingInfo, DragNavigator, ExtendedWidget, Frame, GraphicsImageItem,
+    PRELOADED_MODULES, AbstractQItem, ArInfo, CroppingInfo, DragNavigator, ExtendedWidget, Frame, GraphicsImageItem,
     GraphicsView, HBoxLayout, MainVideoOutputGraphicsView, QAbstractYAMLObjectSingleton, StatusBar, Time, Timer,
     VBoxLayout, VideoOutput, _monkey_runpy_dicts, apply_plotting_style, dispose_environment, get_current_environment,
     make_environment
 )
-from ..models import GeneralModel, VideoOutputs
+from ..models import GeneralModel, VideoOutputs, SceningList
 from ..plugins import FileResolverPlugin, Plugins
 from ..toolbars import Toolbars
 from ..utils import fire_and_forget, set_status_label
@@ -108,6 +108,7 @@ class MainWindow(AbstractQItem, QMainWindow, QAbstractYAMLObjectSingleton):
     reload_before_signal = pyqtSignal()
     reload_after_signal = pyqtSignal()
     cropValuesChanged = pyqtSignal(CroppingInfo)
+    arValuesChanged = pyqtSignal(ArInfo)
 
     reload_stylesheet_signal = pyqtSignal()
 
@@ -156,6 +157,7 @@ class MainWindow(AbstractQItem, QMainWindow, QAbstractYAMLObjectSingleton):
                 tuple[int | None, int | None], float | tuple[int, int] | Fraction
             ] | list[Fraction], int | None]
         ]()
+        self.temporary_scenes = list[SceningList]()
         self.norm_timecodes = dict[int, list[float]]()
 
         self.user_output_info = {
@@ -433,6 +435,7 @@ class MainWindow(AbstractQItem, QMainWindow, QAbstractYAMLObjectSingleton):
             )
 
         self.show()
+        self.plugins.setup_ui()
 
     def handle_error(self, e: Exception) -> None:
         import logging
@@ -780,8 +783,7 @@ class MainWindow(AbstractQItem, QMainWindow, QAbstractYAMLObjectSingleton):
 
         self.switch_frame(self.current_output.last_showed_frame)
 
-        for graphics_view in self.graphics_views:
-            graphics_view.setup_view()
+        self.refresh_graphics_views()
 
         self.timeline.update_notches()
 
@@ -791,6 +793,10 @@ class MainWindow(AbstractQItem, QMainWindow, QAbstractYAMLObjectSingleton):
         self.plugins.on_current_output_changed(index, prev_index)
 
         self.update_statusbar_output_info()
+
+    def refresh_graphics_views(self) -> None:
+        for graphics_view in self.graphics_views:
+            graphics_view.setup_view()
 
     @property
     def current_output(self) -> VideoOutput:
@@ -885,6 +891,9 @@ class MainWindow(AbstractQItem, QMainWindow, QAbstractYAMLObjectSingleton):
             )
 
         self.statusbar.fps_label.setText(f'VFR {output.fps_num}/{output.fps_den} fps ')
+
+    def set_temporary_scenes(self, scenes: SceningList) -> None:
+        self.temporary_scenes = scenes
 
     def update_timecodes_info(
         self, index: int, timecodes: str | Path | dict[

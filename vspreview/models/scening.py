@@ -24,14 +24,15 @@ class SceningList(QAbstractTableModel, QYAMLObject):
     LABEL_COLUMN = 4
     COLUMN_COUNT = 5
 
-    def __init__(self, name: str = '', max_value: Frame | None = None, items: list[Scene] | None = None) -> None:
-        self.setValue(name, max_value, items)
+    def __init__(self, name: str = '', max_value: Frame | None = None, items: list[Scene] | None = None, *, temporary: bool = False) -> None:
+        self.setValue(name, max_value, items, temporary=temporary)
 
-    def setValue(self, name: str = '', max_value: Frame | None = None, items: list[Scene] | None = None) -> None:
+    def setValue(self, name: str = '', max_value: Frame | None = None, items: list[Scene] | None = None, *, temporary: bool = False) -> None:
         super().__init__()
         self.name = name
         self.max_value = max_value if max_value is not None else Frame(2**31)
         self.items = items if items is not None else []
+        self.temporary = temporary
 
         self.main = main_window()
 
@@ -281,7 +282,11 @@ class SceningLists(QAbstractListModel, QYAMLObject):
     def setValue(self, items: list[SceningList] | None = None) -> None:
         super().__init__()
         self.main = main_window()
-        self.items = items if items is not None else []
+        self.main.reload_before_signal.connect(self.clean_items)
+        self.items = (items if items is not None else []) + self.main.temporary_scenes
+
+    def clean_items(self) -> None:
+        self.items = [item for item in self.items if not item.temporary]
 
     def __getitem__(self, i: int) -> SceningList:
         return self.items[i]
@@ -378,6 +383,8 @@ class SceningLists(QAbstractListModel, QYAMLObject):
             raise IndexError
 
     def __getstate__(self) -> Mapping[str, Any]:
+        self.clean_items()
+
         return {
             name: getattr(self, name)
             for name in self.__slots__
