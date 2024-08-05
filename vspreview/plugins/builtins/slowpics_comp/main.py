@@ -6,7 +6,7 @@ import re
 import string
 from datetime import datetime
 from functools import partial
-from typing import Any, Callable, Mapping, cast
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 import requests
@@ -15,17 +15,16 @@ from PyQt6.QtCore import QKeyCombination, Qt, QThread
 from PyQt6.QtWidgets import QComboBox, QFrame, QLabel
 from requests import Session
 from stgpytools import SPath
-from vstools import vs
 
 from vspreview.core import (
     CheckBox, ComboBox, ExtendedWidget, Frame, FrameEdit, HBoxLayout, LineEdit, ProgressBar, PushButton, VBoxLayout,
-    main_window, try_load
+    VideoOutput, main_window, try_load, Stretch
 )
 from vspreview.models import GeneralModel
 
 from .settings import CompSettings
-from .utils import KEYWORD_RE, MAX_ATTEMPTS_PER_PICTURE_TYPE, get_slowpic_upload_headers, get_slowpic_headers
-from .workers import Worker, WorkerConfiguration
+from .utils import KEYWORD_RE, get_slowpic_headers, get_slowpic_upload_headers
+from .workers import FindFramesWorker, FindFramesWorkerConfiguration, Worker, WorkerConfiguration
 
 __all__ = [
     'CompUploadWidget'
@@ -39,13 +38,17 @@ class CompUploadWidget(ExtendedWidget):
         'random_frames_control', 'manual_frames_lineedit', 'output_url_lineedit',
         'current_frame_checkbox', 'is_public_checkbox', 'is_nsfw_checkbox',
         'output_url_copy_button', 'start_upload_button', 'stop_upload_button',
-        'upload_progressbar', 'upload_status_label', 'upload_status_elements'
+        'upload_progressbar', 'upload_status_label', 'upload_status_elements',
+        'random_dark_frame_edit', 'random_light_frame_edit'
     )
 
     settings: CompSettings
 
     upload_thread: QThread
     upload_worker: Worker
+
+    search_thread: QThread
+    search_worker: FindFramesWorker
 
     pic_type_button_I: CheckBox
     pic_type_button_P: CheckBox
@@ -70,7 +73,7 @@ class CompUploadWidget(ExtendedWidget):
     collection_name_cache: str | None
 
     curr_uuid = ''
-    tmdb_data = dict[str, dict[str, Any]]()
+    tmdb_data = dict[str, dict[str, str]]()
 
     _old_threads_workers = list[Any]()
 
@@ -175,6 +178,9 @@ class CompUploadWidget(ExtendedWidget):
 
         self.random_frames_control = FrameEdit(self)
 
+        self.start_rando_frames_control = FrameEdit(self)
+        self.end_rando_frames_control = FrameEdit(self)
+
         self.manual_frames_lineedit = LineEdit('Manual frames: frame,frame,frame', self, )
 
         self.current_frame_checkbox = CheckBox('Current frame', self, checked=True)
@@ -188,6 +194,9 @@ class CompUploadWidget(ExtendedWidget):
         self.pic_type_button_I = CheckBox('I', self, checked=True, clicked=self._force_clicked('I'))
         self.pic_type_button_P = CheckBox('P', self, checked=True, clicked=self._force_clicked('P'))
         self.pic_type_button_B = CheckBox('B', self, checked=True, clicked=self._force_clicked('B'))
+
+        self.random_dark_frame_edit = FrameEdit(self)
+        self.random_light_frame_edit = FrameEdit(self)
 
         self.tmdb_id_lineedit = LineEdit('TMDB ID', self)
         self.tmdb_id_lineedit.setMaximumWidth(75)
@@ -269,6 +278,17 @@ class CompUploadWidget(ExtendedWidget):
             ]),
             self.get_separator(False),
             VBoxLayout([
+                HBoxLayout([
+                    QLabel('Dark Frames:'),
+                    self.random_dark_frame_edit
+                ]),
+                HBoxLayout([
+                    QLabel('Light Frames:'),
+                    self.random_light_frame_edit
+                ]),
+            ]),
+            self.get_separator(False),
+            VBoxLayout([
                 QLabel('Options:'),
                 HBoxLayout([
                     self.is_public_checkbox,
@@ -280,8 +300,20 @@ class CompUploadWidget(ExtendedWidget):
         self.vlayout.addWidget(self.get_separator(True))
 
         HBoxLayout(self.vlayout, [
-            self.tmdb_id_lineedit,
-            self.tmdb_type_combox,
+            VBoxLayout([
+                QLabel('Start frame:'),
+                self.start_rando_frames_control
+            ]),
+            VBoxLayout([
+                QLabel('End frame:'),
+                self.end_rando_frames_control
+            ]),
+            self.get_separator(),
+            VBoxLayout([
+                self.tmdb_id_lineedit,
+                self.tmdb_type_combox,
+            ]),
+            Stretch()
         ])
 
         self.vlayout.addWidget(self.tag_separator)
@@ -317,9 +349,6 @@ class CompUploadWidget(ExtendedWidget):
         self.tag_list_combox.currentIndexChanged.connect(self._handle_tag_index)
 
     def _get_replace_option(self, key: str) -> str | None:
-        if not self.main.outputs:
-            return ''
-
         tmdb_id = self.tmdb_id_lineedit.text() or ''
 
         if 'tmdb_' in key and tmdb_id not in self.tmdb_data:
@@ -329,7 +358,7 @@ class CompUploadWidget(ExtendedWidget):
 
         match key:
             case '{tmdb_title}':
-                return data.get('name', data.get('title', ''))
+                return data.get('name', data.get('title', '')) or ''
             case '{tmdb_year}':
                 return str(
                     datetime.strptime(
@@ -338,7 +367,7 @@ class CompUploadWidget(ExtendedWidget):
                     ).year
                 )
             case '{video_nodes}':
-                return ' vs '.join([video.name for video in self.main.outputs])
+                return ' vs '.join([video.name for video in self.outputs])
 
         return None
 
@@ -392,6 +421,23 @@ class CompUploadWidget(ExtendedWidget):
     def update_tags(self) -> None:
         self.tag_list_combox.setModel(GeneralModel[str](sorted(self.tag_data.keys()), to_title=False))
 
+    def on_current_output_changed(self, index: int, prev_index: int) -> None:
+        assert self.main.outputs
+
+        if not self._thread_running:
+            old_start, old_end = self.start_rando_frames_control.value(), self.end_rando_frames_control.value()
+
+            self.start_rando_frames_control.setMaximum(self.main.current_output.total_frames - 1)
+            self.end_rando_frames_control.setMaximum(self.main.current_output.total_frames)
+
+            if (
+                (old_start, old_end) == (Frame(0), Frame(0))
+            ) or (
+                (old_start, old_end) == (Frame(0), self.main.outputs[prev_index].total_frames)
+            ):
+                self.start_rando_frames_control.setValue(Frame(0))
+                self.end_rando_frames_control.setValue(self.main.current_output.total_frames)
+
     def on_public_toggle(self, new_state: bool) -> None:
         if not new_state or self.tag_data:
             return
@@ -433,18 +479,34 @@ class CompUploadWidget(ExtendedWidget):
             self.manual_frames_lineedit.setText(','.join(current_frames_l))
 
     def on_copy_output_url_clicked(self, checked: bool | None = None) -> None:
-        self.main.clipboard.setText(self.output_url_lineedit.text())
+        self.main.clipboard.setText(self.output_url_lineedit.text())  # type: ignore
         self.main.show_message('Slow.pics URL copied to clipboard!')
 
     def on_start_upload(self) -> None:
         if self._thread_running:
             return
 
-        if not self.upload_to_slowpics():
+        if not self.find_samples(str(uuid4())):
             return
 
         self.start_upload_button.setVisible(False)
         self.stop_upload_button.setVisible(True)
+
+    def on_end_search(self, uuid: str, forced: bool = False, *, conf: FindFramesWorkerConfiguration) -> None:
+        if not forced and uuid != self.curr_uuid:
+            return
+
+        self._thread_running = False
+
+        if forced:
+            self.start_upload_button.setVisible(True)
+            self.stop_upload_button.setVisible(False)
+            self.upload_progressbar.setValue(int())
+            self.upload_status_label.setText('Stopped!')
+        else:
+            self.upload_status_label.setText('Finished!')
+
+        self.upload_to_slowpics(uuid, conf.samples)
 
     def on_end_upload(self, uuid: str, forced: bool = False) -> None:
         if not forced and uuid != self.curr_uuid:
@@ -455,6 +517,9 @@ class CompUploadWidget(ExtendedWidget):
 
         self._thread_running = False
 
+        self.start_rando_frames_control.setEnabled(True)
+        self.end_rando_frames_control.setEnabled(True)
+
         if forced:
             self.upload_progressbar.setValue(int())
             self.upload_status_label.setText('Stopped!')
@@ -462,7 +527,11 @@ class CompUploadWidget(ExtendedWidget):
             self.upload_status_label.setText('Finished!')
 
     def on_stop_upload(self) -> None:
-        self.upload_worker.is_finished = True
+        if hasattr(self, 'search_worker'):
+            self.search_worker.is_finished = True
+
+        if hasattr(self, 'upload_worker'):
+            self.upload_worker.is_finished = True
 
         self.on_end_upload(self.curr_uuid, forced=True)
 
@@ -487,64 +556,6 @@ class CompUploadWidget(ExtendedWidget):
             return
 
         self.upload_status_label.setText(f'{message}{moreinfo}...')
-
-    def _rand_num_frames(self, checked: set[int], rand_func: Callable[[], int]) -> int:
-        rnum = rand_func()
-
-        while rnum in checked:
-            rnum = rand_func()
-
-        return rnum
-
-    def _select_samples_ptypes(self, num_frames: int, k: int, picture_types: set[str]) -> list[Frame]:
-        samples = set[int]()
-        _max_attempts = 0
-        _rnum_checked = set[int]()
-
-        assert self.main.outputs
-
-        picture_types_b = {p.encode() for p in picture_types}
-
-        interval = num_frames // k
-        while len(samples) < k:
-            _attempts = 0
-            while True:
-                if self.upload_worker.is_finished:
-                    raise RuntimeError
-
-                num = len(samples)
-                self.update_status_label(self.curr_uuid, 'search', _attempts, MAX_ATTEMPTS_PER_PICTURE_TYPE)
-                if len(_rnum_checked) >= num_frames:
-                    raise ValueError(f'There aren\'t enough of {picture_types} in these clips')
-                rnum = self._rand_num_frames(_rnum_checked, partial(random.randrange, start=interval * num, stop=(interval * (num + 1)) - 1))
-                _rnum_checked.add(rnum)
-
-                if all(
-                    cast(bytes, f.props['_PictType']) in picture_types_b
-                    for f in vs.core.std.Splice(
-                        [out.prepared.clip[rnum] for out in self.main.outputs], True
-                    ).frames(close=True)
-                ):
-                    break
-
-                _attempts += 1
-                _max_attempts += 1
-
-                if _attempts > MAX_ATTEMPTS_PER_PICTURE_TYPE:
-                    logging.warning(
-                        f'{MAX_ATTEMPTS_PER_PICTURE_TYPE} attempts were made for sample {len(samples)} '
-                        f'and no match found for {picture_types}; stopping iteration...')
-                    break
-
-            if _max_attempts > (curr_max_att := MAX_ATTEMPTS_PER_PICTURE_TYPE * k):
-                raise RecursionError(f'Comp: attempts max of {curr_max_att} has been reached!')
-
-            if _attempts < MAX_ATTEMPTS_PER_PICTURE_TYPE:
-                samples.add(rnum)
-                self.upload_progressbar.setValue(int())
-                self.upload_progressbar.setValue(int(100 * len(samples) / k))
-
-        return list(map(Frame, samples))
 
     def create_slowpics_tags(self) -> list[str]:
         tags = list[str]()
@@ -574,51 +585,23 @@ class CompUploadWidget(ExtendedWidget):
 
         return tags
 
-    def get_slowpics_conf(self) -> WorkerConfiguration:
+    @property
+    def outputs(self) -> list[VideoOutput]:
         assert self.main.outputs
 
-        num = int(self.random_frames_control.value())
-        frames = list[Frame](
-            map(lambda x: Frame(int(x)), filter(None, [x.strip() for x in self.manual_frames_lineedit.text().split(',')]))
-        )
+        filtered_outputs = []
+        for output in self.main.outputs:
+            if output.info.get('disable_comp', False):
+                continue
 
-        picture_types = set[str]()
+            filtered_outputs.append(output)
 
-        if self.pic_type_button_I.isChecked():
-            picture_types.add('I')
+        return filtered_outputs
 
-        if self.pic_type_button_B.isChecked():
-            picture_types.add('B')
-
-        if self.pic_type_button_P.isChecked():
-            picture_types.add('P')
-
-        lens = set(out.prepared.clip.num_frames for out in self.main.outputs)
-
-        if len(lens) != 1:
-            logging.warning('Outputted clips don\'t all have the same length!')
-
-        lens_n = min(lens)
-
+    def get_slowpics_conf(self, uuid: str, samples: list[Frame]) -> WorkerConfiguration:
         path = SPath(main_window().current_config_dir) / ''.join(
             random.choices(string.ascii_uppercase + string.digits, k=16)
         )
-
-        if num:
-            if picture_types == {'I', 'P', 'B'}:
-                interval = lens_n // num
-                samples = list(map(Frame, list(random.randrange(interval * i, (interval * (i + 1)) - 1) for i in range(num))))
-            else:
-                logging.info('Making samples according to specified picture types...')
-                samples = self._select_samples_ptypes(lens_n, num, picture_types)
-        else:
-            samples = []
-
-        if len(frames):
-            samples.extend(frames)
-
-        if self.current_frame_checkbox.isChecked():
-            samples.append(self.main.current_output.last_showed_frame)
 
         collection_name = self._handle_collection_generate().strip()
 
@@ -636,12 +619,12 @@ class CompUploadWidget(ExtendedWidget):
         sample_frames_current_output = list(sorted(set(samples)))
 
         if self.main.timeline.mode == self.main.timeline.Mode.FRAME:
-            sample_frames = [sample_frames_current_output] * len(self.main.outputs)
+            sample_frames = [sample_frames_current_output] * len(self.outputs)
         else:
             sample_timestamps = list(map(self.main.current_output.to_time, sample_frames_current_output))
             sample_frames = [
                 list(map(output.to_frame, sample_timestamps))
-                for output in self.main.outputs
+                for output in self.outputs
             ]
 
         delete_after = self.delete_after_lineedit.text() or None
@@ -664,24 +647,101 @@ class CompUploadWidget(ExtendedWidget):
 
         tags = self.create_slowpics_tags()
 
-        filtered_outputs = []
-        for output in self.main.outputs:
-            if output.info.get('disable_comp', False):
-                continue
-
-            filtered_outputs.append(output)
-
-        sample_frames_int = sorted([list(map(int, x)) for x in sample_frames])
+        sample_frames_int = [list(map(int, x)) for x in sample_frames]
 
         return WorkerConfiguration(
-            str(uuid4()), filtered_outputs, collection_name,
+            uuid, self.outputs, collection_name,
             self.is_public_checkbox.isChecked(), self.is_nsfw_checkbox.isChecked(),
             True, delete_after, sample_frames_int, self.settings.compression, path,
             self.main, self.settings.delete_cache_enabled, self.settings.frame_type_enabled,
             self.settings.browser_id, self.settings.session_id, tmdb_id, tags
         )
 
-    def upload_to_slowpics(self) -> bool:
+    def find_samples(self, uuid: str) -> bool:
+        try:
+            if hasattr(self, 'search_thread'):
+                self._old_threads_workers.append(self.search_thread)
+
+            if hasattr(self, 'search_worker'):
+                self._old_threads_workers.append(self.search_worker)
+
+            self.search_thread = QThread()
+            self.search_worker = FindFramesWorker()
+
+            self.search_worker.moveToThread(self.search_thread)
+
+            try:
+                lens = set(out.prepared.clip.num_frames for out in self.outputs)
+
+                if len(lens) != 1:
+                    logging.warning('Outputted clips don\'t all have the same length!')
+
+                frames = list[Frame](
+                    map(lambda x: Frame(int(x)), filter(None, [x.strip() for x in self.manual_frames_lineedit.text().split(',')]))
+                )
+
+                lens_n = min(lens)
+                num = int(self.random_frames_control.value())
+                dark_num = int(self.random_dark_frame_edit.value())
+                light_num = int(self.random_light_frame_edit.value())
+
+                picture_types = set[str]()
+
+                if self.pic_type_button_I.isChecked():
+                    picture_types.add('I')
+
+                if self.pic_type_button_B.isChecked():
+                    picture_types.add('B')
+
+                if self.pic_type_button_P.isChecked():
+                    picture_types.add('P')
+
+                samples = []
+
+                if len(frames):
+                    samples.extend(frames)
+
+                if self.current_frame_checkbox.isChecked():
+                    samples.append(self.main.current_output.last_showed_frame)
+
+                start_frame = int(self.start_rando_frames_control.value())
+                end_frame = int(self.end_rando_frames_control.value())
+
+                config = FindFramesWorkerConfiguration(
+                    uuid, self.main.current_output, self.outputs, self.main,
+                    start_frame, end_frame,
+                    min(lens_n, end_frame - start_frame), dark_num, light_num,
+                    num, picture_types, samples
+                )
+            except RuntimeError as e:
+                print(e)
+                self.on_end_upload('', True)
+                return False
+
+            self.curr_uuid = config.uuid
+
+            self.search_thread.started.connect(partial(self.search_worker.run, config))
+            self.search_worker.finished.connect(partial(self.on_end_search, conf=config))
+
+            self.search_worker.progress_bar.connect(
+                lambda uuid, val: self.upload_progressbar.setValue(val) if uuid == self.curr_uuid else None
+            )
+            self.search_worker.progress_status.connect(self.update_status_label)
+
+            self.search_thread.start()
+
+            self._thread_running = True
+
+            self.start_rando_frames_control.setEnabled(False)
+            self.end_rando_frames_control.setEnabled(False)
+
+            return True
+        except BaseException as e:
+            self.main.show_message(str(e))
+
+        return True
+
+    def upload_to_slowpics(self, uuid: str, samples: list[Frame]) -> bool:
         try:
             self.main.current_scene.setPixmap(self.main.current_scene.pixmap().copy())
 
@@ -697,7 +757,7 @@ class CompUploadWidget(ExtendedWidget):
             self.upload_worker.moveToThread(self.upload_thread)
 
             try:
-                config = self.get_slowpics_conf()
+                config = self.get_slowpics_conf(uuid, samples)
             except RuntimeError as e:
                 print(e)
                 self.on_end_upload('', True)
