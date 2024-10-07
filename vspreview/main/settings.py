@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from functools import partial
 from multiprocessing import cpu_count
-from typing import Any, Mapping, cast
+from typing import Any, cast
 
 from PyQt6.QtCore import QKeyCombination, Qt
 from PyQt6.QtGui import QShortcut
@@ -189,7 +189,7 @@ class MainSettings(AbstractToolbarSettings):
         return main_window().force_storage or self.force_old_storages_removal_checkbox.isChecked()
 
     @property
-    def azerty_keybinds(self) -> int:
+    def azerty_keybinds(self) -> bool:
         return self.azerty_keyboard_checkbox.isChecked()
 
     @property
@@ -312,7 +312,7 @@ class MainSettings(AbstractToolbarSettings):
     def color_management(self) -> bool:
         return self.color_management_checkbox.isChecked()
 
-    def __getstate__(self) -> Mapping[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         return {
             'autosave_interval': self.autosave_interval,
             'base_ppi': self.base_ppi,
@@ -329,10 +329,11 @@ class MainSettings(AbstractToolbarSettings):
             'dragnavigator_timeout': self.dragnavigator_timeout,
             'dragtimeline_timeout': self.dragtimeline_timeout,
             'plugins_bar_save_behaviour_index': self.plugins_bar_save_behaviour,
-            'color_management': self.color_management
+            'color_management': self.color_management,
+            'azerty_keybinds': self.azerty_keybinds,
         }
 
-    def __setstate__(self, state: Mapping[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         try_load(state, 'autosave_interval', Time, self.autosave_control.setValue)
         try_load(state, 'base_ppi', int, self.base_ppi_spinbox.setValue)
         try_load(state, 'dark_theme', bool, self.dark_theme_checkbox.setChecked)
@@ -349,6 +350,7 @@ class MainSettings(AbstractToolbarSettings):
         try_load(state, 'output_primaries_index', int, self.primaries_combobox.setCurrentIndex)
         try_load(state, 'plugins_bar_save_behaviour_index', int, self.plugins_save_position_combobox.setCurrentIndex)
         try_load(state, 'color_management', bool, self.color_management_checkbox.setChecked)
+        try_load(state, 'azerty_keybinds', bool, self.azerty_keyboard_checkbox.setChecked)
 
 
 class WindowSettings(QYAMLObjectSingleton):
@@ -356,7 +358,7 @@ class WindowSettings(QYAMLObjectSingleton):
         'timeline_mode', 'window_geometry', 'window_state', 'zoom_index', 'x_pos', 'y_pos'
     )
 
-    def __getstate__(self) -> Mapping[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         main = main_window()
 
         return {
@@ -368,7 +370,7 @@ class WindowSettings(QYAMLObjectSingleton):
             'y_pos': main.graphics_view.verticalScrollBar().value(),
         }
 
-    def __setstate__(self, state: Mapping[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         try_load(state, 'timeline_mode', str, self.__setattr__)
         try_load(state, 'window_geometry', bytes, self.__setattr__)
         try_load(state, 'window_state', bytes, self.__setattr__)
