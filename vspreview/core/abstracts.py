@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QSpacerItem, QSpinBox, QTableView, QVBoxLayout, QWidget
 )
 
-from .bases import QABC, QYAMLObjectSingleton
+from .bases import QABC, QYAMLObjectSingleton, SafeYAMLObject
 
 if TYPE_CHECKING:
     from vstools import T
@@ -293,7 +293,7 @@ class AbstractQItem:
         }
 
 
-class AbstractYAMLObject(AbstractQItem):
+class AbstractYAMLObject(AbstractQItem, SafeYAMLObject):
     @abstractmethod
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
@@ -498,7 +498,9 @@ def storage_err_msg(name: str, level: int = 0) -> str:
     import inspect
 
     pretty_name = name.replace('current_', ' ').replace('_enabled', ' ').replace('_', ' ').strip()
-    caller_name = inspect.stack()[level + 1][0].f_locals['self'].__class__.__name__
+    frame = inspect.stack()[level + 1]
+    caller_name = frame[0].f_locals['self'].__class__.__name__
+    frame = None
 
     return f'Storage loading ({caller_name}): failed to parse {pretty_name}. Using default.'
 
