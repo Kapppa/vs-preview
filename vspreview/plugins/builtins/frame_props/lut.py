@@ -156,48 +156,46 @@ vssource_props_lut: dict[str, dict[str, Callable[[Any], str]]] = {
 
 # Wobbly Parser properties
 wobbly_props_lut: dict[str, dict[str, list[str] | Callable[[Any], str]]] = {
-    'wobbly_match': {
-        'Wobbly Match': [
-            'p',
-            'c',
-            'n',
-            'b',
-            'u'
+    'WobblyMatch': {
+        'Field Match': lambda x: (
+            x if str(x) in ['p', 'c', 'n', 'b', 'u']
+            else ['p', 'c', 'n', 'b', 'u'][x] if isinstance(x, int) and 0 <= x < 5
+            else '?'
+        )
+    },
+    'WobblyCombed': {
+        'Combed': [
+            'No',
+            'Yes'
         ]
     },
-    'wobbly_combed': {
-        'Wobbly Combed': [
-            'Yes',
-            'No'
+    'WobblyCycleFps': {
+        'Current Cycle Framerate': lambda fps: str(fps)
+    },
+    'WobblyFreeze': {
+        'Freeze Ranges': lambda freeze: freeze
+    },
+    'WobblyInterlacedFades': {
+        'Interlaced Fade': [
+            'No',
+            'Yes'
         ]
     },
-    'wobbly_cycle_fps': {
-        'Wobbly Cycle Framerate': lambda fps: str(fps)
+    'WobblyOrphanFrame': {
+        'Orphan Frame': lambda m: f"Yes ({m})" if not isinstance(m, int) or m >= 0 else "No"
     },
-    'wobbly_freeze_start': {
-        'Wobbly Freeze Range Start': lambda start: str(start)
+    'WobblyOrphanDeinterlace': {
+        'Orphan Field Deinterlaced': lambda m: f"Yes ({m})" if not isinstance(m, int) or m >= 0 else "No"
     },
-    'wobbly_freeze_end': {
-        'Wobbly Freeze Range End': lambda end: str(end)
+    'WobblyPreset': {
+        'Filtering Preset Applied': lambda preset: str(preset)
     },
-    'wobbly_freeze_replacement': {
-        'Wobbly Freeze Range Replacement': lambda replacement: str(replacement)
+    'WobblyPresetPosition': {
+        'Filtering Preset Position': lambda position: str(position).title()
     },
-    'wobbly_ftf': {
-        'Wobbly Fix Telecined Fades': [
-            'Yes',
-            'No'
-        ]
+    'WobblyPresetFrames': {
+        'Filtering Preset Frame Range': lambda _range: f'({_range[0]}, {_range[-1]})'
     },
-    'wobbly_fif': {
-        'Wobbly Fix Interlaced Fades': [
-            'Yes',
-            'No'
-        ]
-    },
-    'wobbly_orphan_deinterlace': {
-        'Wobbly Orphan Field Deinterlaced': lambda m: f"Yes ({m})" if not isinstance(m, int) or m >= 0 else "No"
-    }
 }
 
 # VMAF-related properties
