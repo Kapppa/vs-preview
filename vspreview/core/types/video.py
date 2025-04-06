@@ -11,7 +11,7 @@ import vapoursynth as vs
 from PyQt6 import sip
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColorSpace, QImage, QPainter, QPixmap
-from stgpytools import cachedproperty, classproperty, fallback
+from jetpytools import cachedproperty, classproperty, fallback
 
 from ..abstracts import AbstractYAMLObject, main_window, try_load
 from ..bases import yaml_Loader
@@ -268,8 +268,9 @@ class VideoOutput(AbstractYAMLObject):
             self.ar_values = ArInfo(1, 1)
 
     def prepare_vs_output(self, clip: vs.VideoNode, pack_rgb: bool = True, fmt: vs.VideoFormat | None = None) -> vs.VideoNode:
+        from jetpytools import KwargsT
         from vstools import (
-            ChromaLocation, ColorRange, DitherType, KwargsT, Matrix, Primaries, Transfer, depth, video_heuristics
+            ChromaLocation, ColorRange, DitherType, Matrix, Primaries, Transfer, depth, video_heuristics
         )
 
         assert (src := clip).format
@@ -292,10 +293,11 @@ class VideoOutput(AbstractYAMLObject):
                 if prop in assumed_props
             ]
 
-            logging.warn(
-                f'Video Node {self.index}: The following frame properties had to be assumed for previewing: '
-                f'<{", ".join(assumed_info)}>\nYou may want to set explicit frame properties instead. '
+            logging.warning(
+                'Video Node {0}: The following frame properties had to be assumed for previewing: '
+                '<{1}>\nYou may want to set explicit frame properties instead. '
                 'See https://www.vapoursynth.com/doc/apireference.html#reserved-frame-properties for more information.'
+                .format(self.index, ", ".join(assumed_info))
             )
 
         standard_gamut = {'transfer': Transfer.BT709, 'primaries': self.main.settings.output_primaries_zimg}
@@ -373,7 +375,7 @@ class VideoOutput(AbstractYAMLObject):
                 from functools import partial
                 from multiprocessing.pool import ThreadPool
 
-                from vstools import ranges_product
+                from jetpytools import ranges_product
 
                 indices = list(ranges_product(blank.height, blank.width))
 
@@ -459,7 +461,7 @@ class VideoOutput(AbstractYAMLObject):
         ar_values: ArInfo | None | bool = None,
         graphics_scene_item: GraphicsImageItem | None = None
     ) -> QPixmap | None:
-        from vstools import complex_hash
+        from jetpytools import complex_hash
 
         old_crop = complex_hash.hash(self.crop_values)
         old_ar = complex_hash.hash(self.ar_values)
