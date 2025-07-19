@@ -187,11 +187,11 @@ class PlaybackToolbar(AbstractToolbar):
         if (
             hasattr(self.main.current_output, 'got_timecodes') and self.main.current_output.got_timecodes and not force
         ):
-            return Fraction(self.main.current_output.timecodes[int(n)])
+            return Fraction(1 / self.main.current_output.timecodes[int(n)])
 
         if any({x not in frameprops for x in {'_DurationDen', '_DurationNum'}}):
             raise RuntimeError(
-                'Playback: DurationDen and DurationNum frame props are needed for VFR clips!'
+                'Playback: `_DurationDen` and `_DurationNum` frame props are needed for VFR clips!'
             )
         return Fraction(frameprops['_DurationDen'], frameprops['_DurationNum'])  # type: ignore
 
@@ -224,7 +224,7 @@ class PlaybackToolbar(AbstractToolbar):
             import logging
             logging.warning(
                 f'The current backend ({PackingType.CURRENT.name}) can\'t playback! '
-                'Install akarin or libp2p plugins.'
+                'Install the vapoursynth-zip plugin.'
             )
             return
 
