@@ -11,7 +11,7 @@ import vapoursynth as vs
 from PyQt6 import sip
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColorSpace, QImage, QPainter, QPixmap
-from jetpytools import cachedproperty, classproperty, fallback
+from jetpytools import classproperty, fallback
 
 from ..abstracts import AbstractYAMLObject, main_window, try_load
 from ..bases import yaml_Loader
@@ -72,13 +72,12 @@ class PackingType():
     vszip_8bit = PackingTypeInfo('vszip_8bit', vs.RGB24, QImage.Format.Format_RGB32, False)
     vszip_10bit = PackingTypeInfo('vszip_10bit', vs.RGB30, QImage.Format.Format_BGR30, True)
 
-    @cachedproperty
-    @classproperty
+    @classproperty.cached
     @classmethod
     def CURRENT(cls) -> PackingTypeInfo:
         _default_10bits = os.name != 'nt' and QPixmap.defaultDepth() == 30
 
-        if hasattr(vs.core, 'vszip'):
+        if hasattr(vs.core, 'vszip') and hasattr(vs.core.vszip, "PackRGB"):
             return PackingType.vszip_10bit if _default_10bits else PackingType.vszip_8bit
         else:
             try:
@@ -368,17 +367,16 @@ class VideoOutput(AbstractYAMLObject):
 
             if PackingType.CURRENT in {PackingType.none_8bit, PackingType.none_10bit}:
                 from functools import partial
+                from itertools import product
                 from multiprocessing.pool import ThreadPool
 
-                from jetpytools import ranges_product
-
-                indices = list(ranges_product(blank.height, blank.width))
+                indices = list(product(range(blank.height), range(blank.width)))
 
                 pool = ThreadPool(self.main.settings.usable_cpus_count * 8)
 
                 def _packing_edarray(
-                    bfp: vs.video_view, src_r: vs.video_view,
-                    src_g: vs.video_view, src_b: vs.video_view,
+                    bfp: vs._video_view, src_r: vs._video_view,
+                    src_g: vs._video_view, src_b: vs._video_view,
                     idx: tuple[int, int]
                 ) -> None:
                     bfp[idx] += (src_r[idx] * r_shift) + (src_g[idx] * g_shift) + (src_b[idx] * b_shift)

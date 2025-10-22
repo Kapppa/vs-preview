@@ -186,7 +186,7 @@ class CompUploadWidget(ExtendedWidget):
 
         self.manual_frames_lineedit = LineEdit('Manual frames: frame,frame,frame', self, )
 
-        self.current_frame_checkbox = CheckBox('Current frame', self, checked=self.settings.default_current_frame)
+        self.current_frame_checkbox = CheckBox('Include current frame', self, checked=self.settings.default_current_frame)
 
         self.collection_name_cache = None
 
@@ -258,6 +258,8 @@ class CompUploadWidget(ExtendedWidget):
                 self.collection_name_button
             ]),
 
+            QLabel('Available replaces: {tmdb_title}, {video_nodes}, {tmdb_year}'),
+
             HBoxLayout([
                 self.manual_frames_lineedit,
                 self.current_frame_checkbox
@@ -288,17 +290,17 @@ class CompUploadWidget(ExtendedWidget):
             self.get_separator(False),
             VBoxLayout([
                 HBoxLayout([
-                    QLabel('Dark Frames:'),
+                    QLabel('Dark frames:'),
                     self.random_dark_frame_edit
                 ]),
                 HBoxLayout([
-                    QLabel('Light Frames:'),
+                    QLabel('Light frames:'),
                     self.random_light_frame_edit
                 ]),
             ]),
             self.get_separator(False),
             VBoxLayout([
-                QLabel('Options:'),
+                QLabel('Collection options:'),
                 HBoxLayout([
                     self.is_public_checkbox,
                     self.is_nsfw_checkbox,
@@ -349,7 +351,7 @@ class CompUploadWidget(ExtendedWidget):
         VBoxLayout(self.vlayout, [
             HBoxLayout([
                 self.output_url_lineedit, self.output_url_copy_button,
-                QLabel('Delete After:'), self.delete_after_lineedit,
+                QLabel('Delete after:'), self.delete_after_lineedit,
                 self.start_upload_button, self.stop_upload_button
             ]),
             HBoxLayout([*self.upload_status_elements])
@@ -517,7 +519,7 @@ class CompUploadWidget(ExtendedWidget):
     def on_start_upload(self) -> None:
         if self._thread_running:
             return
-        
+
         self.was_stopped = False
 
         if not self.find_samples(str(uuid4())):
@@ -746,7 +748,24 @@ class CompUploadWidget(ExtendedWidget):
                     samples.append(self.main.current_output.last_showed_frame)
 
                 start_frame = int(self.start_rando_frames_control.value())
-                end_frame = int(self.end_rando_frames_control.value())
+                end_frame = self._check_end_frame_valid(
+                    int(self.end_rando_frames_control.value())
+                )
+
+                if invalid_frames := [
+                    int(frame) for frame in samples if int(frame) >= end_frame
+                ]:
+                    msg = (
+                        "One or more selected sample frames are after the minimum end frame "
+                        f"of the shortest output clip ({end_frame}): {invalid_frames}. "
+                        "Please check your frame selection and try again."
+                    )
+
+                    logging.error(msg)
+                    self.upload_status_label.setText("Error!")
+                    self.main.show_message(msg)
+
+                    return False
 
                 config = FindFramesWorkerConfiguration(
                     uuid, self.main.current_output, self.outputs, self.main,
@@ -755,8 +774,13 @@ class CompUploadWidget(ExtendedWidget):
                     num, picture_types, samples
                 )
             except RuntimeError as e:
-                print(e)
-                self.on_end_upload('', True)
+                self.upload_status_label.setText("Error!")
+
+                logging.error(str(e))
+                self.main.show_message(str(e))
+
+                self.on_end_upload("", True)
+
                 return False
 
             self.curr_uuid = config.uuid
@@ -802,9 +826,14 @@ class CompUploadWidget(ExtendedWidget):
 
             try:
                 config = self.get_slowpics_conf(uuid, samples)
-            except RuntimeError as e:
-                print(e)
+            except (RuntimeError, ValueError) as e:
+                self.upload_status_label.setText("Error!")
+
+                logging.error(str(e))
+                self.main.show_message(str(e))
+
                 self.on_end_upload('', True)
+
                 return False
 
             self.curr_uuid = config.uuid
@@ -826,6 +855,21 @@ class CompUploadWidget(ExtendedWidget):
             self.main.show_message(str(e))
 
         return False
+
+    def _check_end_frame_valid(self, end_frame: int) -> int:
+        if self.main.outputs is None:
+            return end_frame
+
+        min_total_frames = int(min(output.total_frames for output in self.main.outputs))
+        min_end_frame = min(end_frame, min_total_frames)
+
+        if end_frame > min_total_frames:
+            logging.warning(
+                f'End frame "{end_frame}" exceeds the total frames of the shortest output clip ({min_total_frames})! '
+                f'Using "{min_end_frame}" instead.'
+            )
+
+        return int(min_end_frame)
 
     def __getstate__(self) -> dict[str, Any]:
         return super().__getstate__() | {
